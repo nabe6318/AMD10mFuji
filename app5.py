@@ -1,6 +1,7 @@
 # app5.py
 # 標高補正付き気象マップ（10mメッシュ + 1kmメッシュを別表示：気温のみ）
 # O. Watanabe, Shinshu Univ. / AMD_Tools4 を利用
+# ★10m DEMは必ずアップロード（GitHub/同梱XMLを廃止）
 
 import streamlit as st
 import numpy as np
@@ -51,35 +52,28 @@ ELEMENT_OPTIONS = {
 }
 
 # ============================================================
-# 10m DEM ファイル（app5.py と同じフォルダに置く）
-#   - 塩尻は削除し、富士山周辺メッシュに置換
+# 入力 UI（DEMは必ずアップロード）
 # ============================================================
-AREA_OPTIONS = {
-    "富士山付近（5238-75）": "FG-GML-5238-75-dem10a-20161001.xml",
-    "富士山付近（5238-76）": "FG-GML-5238-76-dem10b-20161001.xml",  # ※実ファイル名に合わせて調整
-    "富士山付近（5338-05）": "FG-GML-5338-05-dem10b-20161001.xml",
-    "富士山付近（5338-06）": "FG-GML-5338-06-dem10b-20161001.xml",
-    "その他（XMLファイルをアップロード）": None,
-}
+st.subheader("🗻 10m標高DEM（XML）をアップロード")
 
-# ============================================================
-# 入力 UI
-# ============================================================
-area_label = st.selectbox("対象エリア（10m DEM）を選択", list(AREA_OPTIONS.keys()))
 xml_file = st.file_uploader(
-    "📂 その他エリアの場合の 10m標高メッシュXMLファイル（『その他』選択時のみ使用）",
-    type="xml"
+    "📂 10m標高メッシュXMLファイル（必須）",
+    type="xml",
+    accept_multiple_files=False
 )
+
 gpkg_file = st.file_uploader("📐 ポリゴンGPKGファイル（任意）", type="gpkg")
+
 element_label = st.selectbox("気象要素を選択", list(ELEMENT_OPTIONS.keys()))
 element = ELEMENT_OPTIONS[element_label]
+
 date_sel = st.date_input("対象日を選択", value=_date.today())
 
 # ============================================================
 # 10m DEM（GMLのtupleList）解析
 # ============================================================
 def parse_gml_tuplelist_xml_10m(xml_bytes: bytes, tol_m: float = 3.0):
-    # 国土地理院DEMは概ねUTF-8（BOM付きもあり得る）なので両対応
+    # UTF-8 / UTF-8-SIG を両対応
     try:
         xml_str = xml_bytes.decode("utf-8")
     except UnicodeDecodeError:
@@ -101,7 +95,7 @@ def parse_gml_tuplelist_xml_10m(xml_bytes: bytes, tol_m: float = 3.0):
     headers = lines[:idx]
     datalist = lines[idx + 1: idx_end]
 
-    # 標高値を抽出（"(i,xxx)"のような形式を想定し 2列目をfloat化）
+    # 標高値を抽出（"(i,xxx)"のような形式を想定し2列目をfloat化）
     try:
         body = np.array([float(l.split(",")[1].rstrip(") \r\n")) for l in datalist], dtype=float)
     except Exception as e:
@@ -165,6 +159,12 @@ def parse_gml_tuplelist_xml_10m(xml_bytes: bytes, tol_m: float = 3.0):
     return elev, lat_grid, lon_grid, lalodomain, dy_m, dx_m
 
 
+@st.cache_data(show_spinner=False)
+def parse_10m_dem_cached(xml_bytes: bytes):
+    # 解析結果をキャッシュ（同じXMLで日付/要素を変えるときに速い）
+    return parse_gml_tuplelist_xml_10m(xml_bytes, tol_m=3.0)
+
+
 def to_2d_grid(arr, name):
     arr = np.array(arr)
     if arr.ndim == 2:
@@ -193,34 +193,19 @@ if st.button("🌏 マップ作成"):
 
     try:
         # ----------------------------
-        # 10m DEM XML のバイト列を取得
+        # 10m DEM XML のバイト列を取得（アップロード必須）
         # ----------------------------
-        selected_fname = AREA_OPTIONS.get(area_label)
+        if xml_file is None:
+            st.error("10m標高メッシュXMLファイル（.xml）をアップロードしてください。")
+            st.stop()
 
-        if selected_fname is not None:
-            xml_path = os.path.join(os.path.dirname(__file__), selected_fname)
-            if not os.path.exists(xml_path):
-                st.error(
-                    f"{area_label} の DEM ファイルが見つかりません：{selected_fname}\n"
-                    "app5.py と同じフォルダに配置してください。"
-                )
-                st.stop()
-
-            with open(xml_path, "rb") as f:
-                xml_bytes = f.read()
-            st.caption(f"{area_label} の既定DEM ({selected_fname}) を使用します。")
-
-        else:
-            if xml_file is None:
-                st.error("『その他（XMLファイルをアップロード）』を選択した場合は、10m標高XMLをアップロードしてください。")
-                st.stop()
-            xml_bytes = xml_file.getvalue()
-            st.caption("アップロードされた 10m 標高XML を使用します。")
+        xml_bytes = xml_file.getvalue()
+        st.caption(f"アップロードDEM：{xml_file.name}")
 
         # ----------------------------
-        # 10m DEM 読み込み
+        # 10m DEM 読み込み（キャッシュ）
         # ----------------------------
-        nli10m, lat10m, lon10m, lalodomain, dy_m, dx_m = parse_gml_tuplelist_xml_10m(xml_bytes, tol_m=3.0)
+        nli10m, lat10m, lon10m, lalodomain, dy_m, dx_m = parse_10m_dem_cached(xml_bytes)
         st.caption(f"推定メッシュ解像度: dy≈{dy_m:.2f} m, dx≈{dx_m:.2f} m（10m判定OK）")
 
         # ----------------------------
@@ -231,13 +216,13 @@ if st.button("🌏 マップ作成"):
         Msha, _, _, nama, unia = amd.GetGeoData("altitude", lalodomain, namuni=True)
 
         Msh2D = to_2d_grid(Msh, "気象データ(1km)")
-        Msha2D = to_2d_grid(Msha, "標高データ(1km)")
+        _ = to_2d_grid(Msha, "標高データ(1km)")  # 表示用に使うなら保持してもOK
 
         val_msh = safe_scalar(Msh, "気象データ")
         val_msha = safe_scalar(Msha, "標高データ(1km)")
 
         lapse = 0.006  # 0.6℃/100m
-        corrected = val_msh + (val_msha - nli10m) * lapse  # nli10mは2D
+        corrected = val_msh + (val_msha - nli10m) * lapse
 
         # 1km格子の軸（表示用）
         lat_km = lon_km = None
@@ -261,14 +246,14 @@ if st.button("🌏 マップ作成"):
         lon_span = float(np.max(lon10m) - np.min(lon10m))
         yoko = tate * (lon_span / max(1e-9, lat_span)) + 2
 
+        # tim[0] が datetime 以外でも落ちないようにする
+        try:
+            date_str = tim[0].strftime("%Y-%m-%d")
+        except Exception:
+            date_str = str(date_sel)
+
         # --- タブ1: 10m DEM補正 ---
         with tabs[0]:
-            # tim[0] が datetime 以外でも落ちないようにする
-            try:
-                date_str = tim[0].strftime("%Y-%m-%d")
-            except Exception:
-                date_str = str(date_sel)
-
             figtitle = f"{nam} [{uni}] on {date_str} (10m補正)"
             fig = plt.figure(figsize=(yoko, tate))
             ax = plt.gca()
@@ -293,11 +278,6 @@ if st.button("🌏 マップ作成"):
         # --- タブ2: 1kmメッシュ ---
         with tabs[1]:
             if (Msh2D is not None) and (lat_km is not None) and (lon_km is not None):
-                try:
-                    date_str = tim[0].strftime("%Y-%m-%d")
-                except Exception:
-                    date_str = str(date_sel)
-
                 figtitle_km = f"1kmメッシュ {nam} [{uni}] on {date_str}"
                 fig_km = plt.figure(figsize=(yoko, tate))
                 ax_km = plt.gca()
@@ -324,7 +304,7 @@ if st.button("🌏 マップ作成"):
                 st.info("この領域では1kmメッシュデータが取得できませんでした。")
 
         # =======================================================
-        # CSVダウンロード（構文が崩れないよう for ループ版）
+        # CSVダウンロード（forループ版：構文が崩れない）
         # =======================================================
         st.subheader("📥 CSVダウンロード")
 
@@ -410,4 +390,4 @@ if st.button("🌏 マップ作成"):
         st.error(f"❌ 処理中にエラーが発生しました: {e}")
 
 else:
-    st.info("エリア・日付などを指定してから「🌏 マップ作成」を押してください。")
+    st.info("DEM XMLをアップロードし、日付・要素を選択してから「🌏 マップ作成」を押してください。")
